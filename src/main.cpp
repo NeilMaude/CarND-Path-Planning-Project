@@ -240,6 +240,9 @@ int main() {
           	// Sensor Fusion Data, a list of all other cars on the same side of the road.
           	vector<vector<double>> sensor_fusion = j[1]["sensor_fusion"];
 
+          	// Print some info to help with dev
+          	//std::cout << " Car position at present, s=" << car_s << ", d=" << car_d << std::endl;
+
           	// get the size of the previous path (if any)
           	int prev_size = previous_path_x.size();
 
@@ -344,10 +347,10 @@ int main() {
           								 // will also need to consider not doing a jerk deceleration
 
           				too_close = true;
-          				if(lane >0)
+/*          				if(lane > 0)				// just jump into the left lane, for demo...
           				{
-          					lane = 0;
-          				}
+          					lane = 0;				// spline calc will sort this out later...
+          				}*/
           			}
           		}
 
@@ -362,6 +365,70 @@ int main() {
           	{
           		ref_vel += 0.224;
           	}
+
+          	// score the lanes using a cost function and pick one to move into
+          	if (too_close)
+          	{
+				// first weighting parameter - distance to a car ahead in this lane
+				double weight_car_ahead = -10.0;
+
+				int best_lane;
+				double best_lane_score = -1e6;		// really big negative number
+				double this_lane_score = 0;
+				for (int l = 2; l >=0; l--)			// bias to towards turn-off lane (UK legal requirement to drive on the left-most, transposed to US road layout... ;-) )
+				{
+					// score the l-th lane
+					this_lane_score = 0;
+					for (int i = 0; i < sensor_fusion.size(); i++)
+					{
+						// are any cars in this lane l and within 30m of our car
+						float d = sensor_fusion[i][6];	// d-value of the i-th car
+						if (d < (2 + 4 * l + 2) && d > (2 + 4 * l - 2))   // is this car in the l-th lane?
+						{
+							// yes, in the lane we're looking at...
+							double vx = sensor_fusion[i][3];
+							double vy = sensor_fusion[i][4];
+							double check_speed = sqrt(vx*vx+vy*vy);
+							double check_car_s = sensor_fusion[i][5];
+
+							check_car_s += ((double)prev_size * .02 * check_speed);  // can project s value using previous points, same as for in-lane checking
+							if((check_car_s > car_s) && ((check_car_s - car_s) < 30))	// within 30m...
+							{
+								// yes, within the lane we're looking at
+								std::cout << "Found car (" << i << ") in lane " << l << " at distance " << (check_car_s - car_s) << std::endl;
+								// penalise this lane
+								this_lane_score += ((30 - (check_car_s - car_s)) * weight_car_ahead);		// give some penalty proportionate to the nearness of the car in this lane
+
+							}
+						}
+					}
+					if (this_lane_score > best_lane_score)
+					{
+						// better lane than any so far...
+						// check that we're not doing a 2-lane hop or this will break the jerk requirement...
+						if (abs(lane - l) <= 1)
+						{
+							best_lane = l;
+							best_lane_score = this_lane_score;
+						}
+						else
+						{
+							std::cout << "Discarding 2-lane hop from " << lane << " to " << l << std::endl;
+						}
+					}
+					std::cout << "Lane " << l << " score " << this_lane_score << " (best = " << best_lane_score << ")" << std::endl;
+				}
+				std::cout << "Best lane option is: " << best_lane << std::endl;
+				lane = best_lane;
+          	}
+
+          	// check if the chosen lane is safe to move into
+          	// once a lane is selected to move into, the car should complete the lane-change before choosing a new path
+
+
+          	// The remaining code creates a smooth path by adding new points to the previous un-used points
+          	// This code will respect the setting for "lane" and aim to drive the car into that lane
+          	// So we need to be sure that this is the desired lane and that it is safe to move to that lane (or remain in it)
 
           	// how to create a smooth path (spline) over the range of the required path
           	vector<double> ptsx;
@@ -426,11 +493,13 @@ int main() {
           		ptsy[i] = (shift_x * sin(0 - ref_yaw) + shift_y * cos(0 - ref_yaw));
           	}
 
+/*
           	std::cout << "Vector sizes: " << ptsx.size() << "," << ptsy.size() << std::endl;
           	for (int i = 0; i < ptsx.size(); i++)
           	{
           		std::cout << ptsx[i] << "," << ptsy[i] << std::endl;
           	}
+*/
 
           	// create a spline
           	tk::spline s;
@@ -444,7 +513,7 @@ int main() {
           		next_x_vals.push_back(previous_path_x[i]);
           		next_y_vals.push_back(previous_path_y[i]);
           	}
-          	std::cout << "Added " << previous_path_x.size() << " points from previous path" << std::endl;
+          	//std::cout << "Added " << previous_path_x.size() << " points from previous path" << std::endl;
 
           	// calculate how to break up the spline points to travel at our required velocity
 
@@ -477,7 +546,7 @@ int main() {
           		next_y_vals.push_back(y_point);
 
           	}
-          	std::cout << "Added " << 50 - previous_path_x.size() << " new points" << std::endl;
+          	//std::cout << "Added " << 50 - previous_path_x.size() << " new points" << std::endl;
 
           	msgJson["next_x"] = next_x_vals;
           	msgJson["next_y"] = next_y_vals;
