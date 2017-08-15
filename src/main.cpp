@@ -210,6 +210,12 @@ int main() {
     // The 2 signifies a websocket event
     //auto sdata = string(data).substr(0, length);
     //cout << sdata << endl;
+
+	// Path planning constants
+	double min_gap_behind = 10.0;			// minimum gap behind the car required before starting a lane change
+	double min_gap_ahead  = 10.0;			// minimum gap ahead of the car required before starting a lane change
+
+
     if (length && length > 2 && data[0] == '4' && data[1] == '2') {
 
       auto s = hasData(data);
@@ -367,6 +373,8 @@ int main() {
           	}
 
           	// score the lanes using a cost function and pick one to move into
+          	int target_lane;
+          	target_lane = lane;
           	if (too_close)
           	{
 				// first weighting parameter - distance to a car ahead in this lane
@@ -402,6 +410,7 @@ int main() {
 							}
 						}
 					}
+/*
 					if (this_lane_score > best_lane_score)
 					{
 						// better lane than any so far...
@@ -416,13 +425,65 @@ int main() {
 							std::cout << "Discarding 2-lane hop from " << lane << " to " << l << std::endl;
 						}
 					}
+*/
+					if (this_lane_score > best_lane_score)
+					{
+						// better lane than any so far...
+						best_lane = l;
+						best_lane_score = this_lane_score;
+
+					}
 					std::cout << "Lane " << l << " score " << this_lane_score << " (best = " << best_lane_score << ")" << std::endl;
 				}
 				std::cout << "Best lane option is: " << best_lane << std::endl;
-				lane = best_lane;
+				if (abs(lane - best_lane) <= 1)
+				{
+					// just hop to that lane
+					target_lane = best_lane;
+				}
+				else
+				{
+					// don't want a 2-lane hop
+					std::cout << "Discarding 2-lane hop from " << lane << " to " << best_lane << std::endl;
+					target_lane = 1;
+				}
           	}
 
           	// check if the chosen lane is safe to move into
+          	if (target_lane != lane)
+          	{
+          		// lane change recommended - check if there are cars in this lane near to our car
+          		// do this by a simple check against check_car_s for each car in target_lane
+          		// will be done on min_gap_ahead and min_gap_behind parameters
+          		bool safe_change = true;
+          		for (int i = 0; i < sensor_fusion.size(); i++)
+          		{
+          			float d = sensor_fusion[i][6];	// d-value of the i-th car
+          			if (d < (2 + 4 * target_lane + 2) && d > (2 + 4 * target_lane - 2))   // is this car in the l-th lane?
+          			{
+          				// the car is in our lane of interest
+						double vx = sensor_fusion[i][3];
+						double vy = sensor_fusion[i][4];
+						double check_speed = sqrt(vx*vx+vy*vy);
+						double check_car_s = sensor_fusion[i][5];
+						// circumstances in which the car should not change lane
+						// check_car_s += ((double)prev_size * .02 * check_speed);
+						std::cout << "Found car (" << i << ") in preferred lane " << target_lane << " (car_s = " << car_s << ", check_car_s = " << check_car_s << ")" << std::endl;
+						check_car_s += ((double)prev_size * .02 * check_speed);
+						std::cout << "Projected check_car_s = " << check_car_s << std::endl;
+						if ((check_car_s > (car_s - min_gap_behind)) && (check_car_s < (car_s + min_gap_ahead)))
+						{
+							safe_change = false;
+							std::cout << "Can't change lane to target lane " << target_lane << " - car in the way!" << std::endl;
+						}
+          			}
+          		}
+          		if (safe_change)
+          		{
+          			lane = target_lane;
+          		}
+          	}
+
           	// once a lane is selected to move into, the car should complete the lane-change before choosing a new path
 
 
