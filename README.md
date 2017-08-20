@@ -55,7 +55,9 @@ Note: it may be the case that there is lots of traffic in the chosen lane - ther
 ## Output
 This path planning implementation drives the car smoothly around the test track, remaining within the speed/acceleration/jerk constraints and avoiding other cars.  The car is occasionally slowed due to being boxed-in by other cars, which could be improved by some of the enhancements suggested below.
 
+Example of 10 miles of safe driving: [10 miles (https://youtu.be/IM1ge4llcXE)]
 
+Sometimes things don't work out - example of being taken out by another car which lane changes into our car: [crash (https://youtu.be/kypKML8-wRI)]
 
 ## Potential Enhancements
 The following are potential enhancements to the path planning process:
@@ -63,6 +65,7 @@ The following are potential enhancements to the path planning process:
 * In general it is assumed that other cars will continue at a fixed speed in their current lane.  In the real world this will not be the case and a predictive solution would be an improvement over this simple assumption.
 * The lane scoring cost function is simple and effective, but could be improved.  For example, this function does not consider the speeds of cars in adjacent lanes and may select a lane with a slow car rather than a lane with a faster, but nearby, car - this second lane would make for better progress.
 * The lane scoring function only looks at cars which are within the 30m horizon used for speed detection.  Sometimes this means that the car prefers a lane which will shortly be occupied, over a lane which is clear for some distance.  This could be addressed by extending the horizon for the cost function.
+* Given the example of being taken out by a car which changes lane into our car, there is potential for more conservative checking for a safe lane-change - possibly by checking for cars in the next-but-one lane, who may lane-change into us without warning.
 
 # Udacity Instructions Follow:
 
