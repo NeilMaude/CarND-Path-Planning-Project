@@ -20,6 +20,34 @@ constexpr double pi() { return M_PI; }
 double deg2rad(double x) { return x * pi() / 180; }
 double rad2deg(double x) { return x * 180 / pi(); }
 
+// Car state constants
+const int CAR_DRIVE_AHEAD = 0;
+const int CAR_PREPARE_MOVE_LEFT = 1;
+const int CAR_PREPARE_MOVE_RIGHT = 2;
+const int CAR_CHANGE_LANE_LEFT = 3;
+const int CAR_CHANGE_LANE_RIGHT = 4;
+const int CAR_MAX_WAIT_ITERATIONS = 250;		// approx. 5 seconds (250 * .02), time to wait before giving up on a lane change (due to traffic)
+
+string car_state_description(int state) {
+	string s_desc = "";
+	if (state == CAR_DRIVE_AHEAD) {
+		s_desc = "Driving in lane";
+	}
+	else if (state == CAR_PREPARE_MOVE_LEFT) {
+		s_desc = "Preparing to move left";
+	}
+	else if (state == CAR_PREPARE_MOVE_RIGHT) {
+		s_desc = "Preparing to move right";
+	}
+	else if (state == CAR_CHANGE_LANE_LEFT) {
+			s_desc = "Changing lane to the left";
+	}
+	else if (state == CAR_CHANGE_LANE_RIGHT) {
+			s_desc = "Changing lane to the right";
+	}
+	return s_desc;
+}
+
 // Checks if the SocketIO event has JSON data.
 // If there is data the JSON object in string format will be returned,
 // else the empty string "" will be returned.
@@ -201,9 +229,14 @@ int main() {
   int lane = 1;
   // reference velocity
   double ref_vel = 0; // zero for cold start 49.5;	// close to speed limit, with a bit of leeway
+  // target lane
+  int future_lane = 1;	// target lane when preparing for lane changes
+  // current car state
+  int car_state = CAR_DRIVE_AHEAD;	// current state of the car
+  // iterations before giving up on a potential lane change
+  int wait_iterations = 0;			// holds the number of points consumed (0.2 sec intervals) in the current waiting-to-change-lanes state
 
-
-  h.onMessage([&map_waypoints_x,&map_waypoints_y,&map_waypoints_s,&map_waypoints_dx,&map_waypoints_dy,&lane,&ref_vel](uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length,
+  h.onMessage([&map_waypoints_x,&map_waypoints_y,&map_waypoints_s,&map_waypoints_dx,&map_waypoints_dy,&lane,&ref_vel,&future_lane,&car_state,&wait_iterations](uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length,
                      uWS::OpCode opCode) {
     // "42" at the start of the message means there's a websocket message event.
     // The 4 signifies a websocket message
@@ -212,9 +245,18 @@ int main() {
     //cout << sdata << endl;
 
 	// Path planning constants
-	double min_gap_behind = 10.0;			// minimum gap behind the car required before starting a lane change
-	double min_gap_ahead  = 10.0;			// minimum gap ahead of the car required before starting a lane change
+	const double min_gap_behind = 10.0;			// minimum gap behind the car required before starting a lane change
+	const double min_gap_ahead  = 10.0;			// minimum gap ahead of the car required before starting a lane change
 
+	// check the current car state and spit out some debug info to the console
+	std::cout << "Current state: " << car_state_description(car_state);
+	if (car_state != CAR_DRIVE_AHEAD)	{
+		std::cout << " (current lane: " << lane << ", moving to lane: " << future_lane << ")";
+	}
+	else {
+		std::cout << " (current lane: " << lane << ")";
+	}
+	std::cout << std::endl;
 
     if (length && length > 2 && data[0] == '4' && data[1] == '2') {
 
@@ -227,7 +269,7 @@ int main() {
         
         if (event == "telemetry") {
           // j[1] is the data JSON object
-          
+
         	// Main car's localization Data
           	double car_x = j[1]["x"];
           	double car_y = j[1]["y"];
@@ -236,12 +278,37 @@ int main() {
           	double car_yaw = j[1]["yaw"];
           	double car_speed = j[1]["speed"];
 
+          	// has the car completed a lane change?
+        	if ((car_state == CAR_CHANGE_LANE_LEFT) || (car_state == CAR_CHANGE_LANE_RIGHT)) {
+        		// is the car in future_lane *now*
+        		double current_d = j[1]["d"];
+        		if (current_d < (2 + 4 * future_lane + 2) && current_d > (2 + 4 * future_lane - 2)) {
+        			// yes, in the lane (may need to narrow this down a bit...
+        			car_state = CAR_DRIVE_AHEAD;
+        			std::cout << "Lane change complete, car_d = " << car_d << std::endl;
+        		}
+        	}
+
+
           	// Previous path data given to the Planner
           	auto previous_path_x = j[1]["previous_path_x"];
           	auto previous_path_y = j[1]["previous_path_y"];
           	// Previous path's end s and d values 
           	double end_path_s = j[1]["end_path_s"];
           	double end_path_d = j[1]["end_path_d"];
+
+        	// are we waiting for a lane change to be possible?
+        	// and should we give up on it?
+        	if ((car_state == CAR_PREPARE_MOVE_LEFT) || (car_state == CAR_PREPARE_MOVE_RIGHT)) {
+        		wait_iterations += 50 - previous_path_x.size();			// this is the number of points consumed per iteration
+        		if (wait_iterations > CAR_MAX_WAIT_ITERATIONS) {
+        			// give up on the lane change operation
+        			wait_iterations = 0;
+        			future_lane = lane;
+        			car_state = CAR_DRIVE_AHEAD;
+        			std::cout << "Lane change cancelled - waiting too long..." << std::endl;
+        		}
+        	}
 
           	// Sensor Fusion Data, a list of all other cars on the same side of the road.
           	vector<vector<double>> sensor_fusion = j[1]["sensor_fusion"];
@@ -372,120 +439,159 @@ int main() {
           		ref_vel += 0.224;
           	}
 
-          	// score the lanes using a cost function and pick one to move into
-          	int target_lane;
-          	target_lane = lane;
-          	if (too_close)
-          	{
-				// first weighting parameter - distance to a car ahead in this lane
-				double weight_car_ahead = -10.0;
+          	// If we are too close to the car in front, and just driving in lane, we can select a new lane
+          	if ((car_state == CAR_DRIVE_AHEAD) && (too_close)) {
 
-				int best_lane;
-				double best_lane_score = -1e6;		// really big negative number
-				double this_lane_score = 0;
-				for (int l = 2; l >=0; l--)			// bias to towards turn-off lane (UK legal requirement to drive on the left-most, transposed to US road layout... ;-) )
+				// score the lanes using a cost function and pick one to move into
+				int target_lane;
+				target_lane = lane;
+				if (too_close)
 				{
-					// score the l-th lane
-					this_lane_score = 0;
+					std::cout << "Driving straight and too close - selecting new lane..." << std::endl;
+
+					// first weighting parameter - distance to a car ahead in this lane
+					double weight_car_ahead = -10.0;
+
+					int best_lane;
+					double best_lane_score = -1e6;		// really big negative number
+					double this_lane_score = 0;
+					for (int l = 2; l >=0; l--)			// bias to towards turn-off lane (UK legal requirement to drive on the left-most, transposed to US road layout... ;-) )
+					{
+						// score the l-th lane
+						this_lane_score = 0;
+						for (int i = 0; i < sensor_fusion.size(); i++)
+						{
+							// are any cars in this lane l and within 30m of our car
+							float d = sensor_fusion[i][6];	// d-value of the i-th car
+							if (d < (2 + 4 * l + 2) && d > (2 + 4 * l - 2))   // is this car in the l-th lane?
+							{
+								// yes, in the lane we're looking at...
+								double vx = sensor_fusion[i][3];
+								double vy = sensor_fusion[i][4];
+								double check_speed = sqrt(vx*vx+vy*vy);
+								double check_car_s = sensor_fusion[i][5];
+
+								check_car_s += ((double)prev_size * .02 * check_speed);  // can project s value using previous points, same as for in-lane checking
+								if((check_car_s > car_s) && ((check_car_s - car_s) < 30))	// within 30m...
+								{
+									// yes, within the lane we're looking at
+									std::cout << "Found car (" << i << ") in lane " << l << " at distance " << (check_car_s - car_s) << std::endl;
+									// penalise this lane
+									this_lane_score += ((30 - (check_car_s - car_s)) * weight_car_ahead);		// give some penalty proportionate to the nearness of the car in this lane
+
+								}
+							}
+						}
+	/*
+						if (this_lane_score > best_lane_score)
+						{
+							// better lane than any so far...
+							// check that we're not doing a 2-lane hop or this will break the jerk requirement...
+							if (abs(lane - l) <= 1)
+							{
+								best_lane = l;
+								best_lane_score = this_lane_score;
+							}
+							else
+							{
+								std::cout << "Discarding 2-lane hop from " << lane << " to " << l << std::endl;
+							}
+						}
+	*/
+						if (this_lane_score > best_lane_score)
+						{
+							// better lane than any so far...
+							best_lane = l;
+							best_lane_score = this_lane_score;
+
+						}
+						std::cout << "Lane " << l << " score " << this_lane_score << " (previous best score = " << best_lane_score << ")" << std::endl;
+					}
+					std::cout << "Best lane option is: " << best_lane << std::endl;
+					if (abs(lane - best_lane) <= 1)
+					{
+						// just hop to that lane
+						target_lane = best_lane;
+					}
+					else
+					{
+						// don't want a 2-lane hop
+						std::cout << "Discarding 2-lane hop from " << lane << " to " << best_lane << std::endl;
+						target_lane = 1;	// have to be moving to the middle lane
+					}
+				}
+				// set the new car state
+				if (target_lane == lane) {
+					// just driving ahead
+					car_state = CAR_DRIVE_AHEAD;
+					future_lane = lane;
+				}
+				else if (target_lane < lane) {
+					car_state = CAR_PREPARE_MOVE_LEFT;
+					future_lane = target_lane;
+					wait_iterations = 0;
+				}
+				else if (target_lane > lane) {
+					car_state = CAR_PREPARE_MOVE_RIGHT;
+					future_lane = target_lane;
+					wait_iterations = 0;
+				}
+				// completed the lane scoring process
+				std::cout << "Completed lane scoring process...(" << car_state << ")" << std::endl;
+
+          	}
+
+          	// once a lane is selected to move into, the car should complete the lane-change before choosing a new path
+          	// Are we preparing to move lane (to future_lane)?  If so, check if it's empty or not
+          	if ((car_state == CAR_PREPARE_MOVE_LEFT) || (car_state == CAR_PREPARE_MOVE_RIGHT)) {
+          		// checking for safety
+          		std::cout << "Checking if lane " << future_lane << " is safe for lane change (current lane = " << lane << ")" << std::endl;
+
+				// check if the chosen lane is safe to move into
+				if (future_lane != lane)
+				{
+					// lane change recommended - check if there are cars in this lane near to our car
+					// do this by a simple check against check_car_s for each car in target_lane
+					// will be done on min_gap_ahead and min_gap_behind parameters
+					bool safe_change = true;
 					for (int i = 0; i < sensor_fusion.size(); i++)
 					{
-						// are any cars in this lane l and within 30m of our car
 						float d = sensor_fusion[i][6];	// d-value of the i-th car
-						if (d < (2 + 4 * l + 2) && d > (2 + 4 * l - 2))   // is this car in the l-th lane?
+						if (d < (2 + 4 * future_lane + 2) && d > (2 + 4 * future_lane - 2))   // is this car in the l-th lane?
 						{
-							// yes, in the lane we're looking at...
+							// the car is in our lane of interest
 							double vx = sensor_fusion[i][3];
 							double vy = sensor_fusion[i][4];
 							double check_speed = sqrt(vx*vx+vy*vy);
 							double check_car_s = sensor_fusion[i][5];
-
-							check_car_s += ((double)prev_size * .02 * check_speed);  // can project s value using previous points, same as for in-lane checking
-							if((check_car_s > car_s) && ((check_car_s - car_s) < 30))	// within 30m...
+							// circumstances in which the car should not change lane
+							// check_car_s += ((double)prev_size * .02 * check_speed);
+							std::cout << "Found car (" << i << ") in preferred lane " << future_lane << " (car_s = " << car_s << ", check_car_s = " << check_car_s << ")" << std::endl;
+							check_car_s += ((double)prev_size * .02 * check_speed);
+							std::cout << "Projected check_car_s = " << check_car_s << std::endl;
+							if ((check_car_s > (car_s - min_gap_behind)) && (check_car_s < (car_s + min_gap_ahead)))
 							{
-								// yes, within the lane we're looking at
-								std::cout << "Found car (" << i << ") in lane " << l << " at distance " << (check_car_s - car_s) << std::endl;
-								// penalise this lane
-								this_lane_score += ((30 - (check_car_s - car_s)) * weight_car_ahead);		// give some penalty proportionate to the nearness of the car in this lane
-
+								safe_change = false;
+								std::cout << "Can't change lane to target lane " << future_lane << " - car in the way!" << std::endl;
 							}
 						}
 					}
-/*
-					if (this_lane_score > best_lane_score)
+					if (safe_change)
 					{
-						// better lane than any so far...
-						// check that we're not doing a 2-lane hop or this will break the jerk requirement...
-						if (abs(lane - l) <= 1)
-						{
-							best_lane = l;
-							best_lane_score = this_lane_score;
+						// yes, safe to change lanes
+						std::cout << "Safe to change lanes, updating car state and lane for path planning" << std::endl;
+						// update the car_state
+						if (future_lane < lane) {
+							car_state = CAR_CHANGE_LANE_LEFT;
 						}
-						else
-						{
-							std::cout << "Discarding 2-lane hop from " << lane << " to " << l << std::endl;
+						else if (future_lane > lane) {
+							car_state = CAR_CHANGE_LANE_RIGHT;
 						}
+						// update lane, to make the change actually happen
+						lane = future_lane;
 					}
-*/
-					if (this_lane_score > best_lane_score)
-					{
-						// better lane than any so far...
-						best_lane = l;
-						best_lane_score = this_lane_score;
-
-					}
-					std::cout << "Lane " << l << " score " << this_lane_score << " (best = " << best_lane_score << ")" << std::endl;
-				}
-				std::cout << "Best lane option is: " << best_lane << std::endl;
-				if (abs(lane - best_lane) <= 1)
-				{
-					// just hop to that lane
-					target_lane = best_lane;
-				}
-				else
-				{
-					// don't want a 2-lane hop
-					std::cout << "Discarding 2-lane hop from " << lane << " to " << best_lane << std::endl;
-					target_lane = 1;
 				}
           	}
-
-          	// check if the chosen lane is safe to move into
-          	if (target_lane != lane)
-          	{
-          		// lane change recommended - check if there are cars in this lane near to our car
-          		// do this by a simple check against check_car_s for each car in target_lane
-          		// will be done on min_gap_ahead and min_gap_behind parameters
-          		bool safe_change = true;
-          		for (int i = 0; i < sensor_fusion.size(); i++)
-          		{
-          			float d = sensor_fusion[i][6];	// d-value of the i-th car
-          			if (d < (2 + 4 * target_lane + 2) && d > (2 + 4 * target_lane - 2))   // is this car in the l-th lane?
-          			{
-          				// the car is in our lane of interest
-						double vx = sensor_fusion[i][3];
-						double vy = sensor_fusion[i][4];
-						double check_speed = sqrt(vx*vx+vy*vy);
-						double check_car_s = sensor_fusion[i][5];
-						// circumstances in which the car should not change lane
-						// check_car_s += ((double)prev_size * .02 * check_speed);
-						std::cout << "Found car (" << i << ") in preferred lane " << target_lane << " (car_s = " << car_s << ", check_car_s = " << check_car_s << ")" << std::endl;
-						check_car_s += ((double)prev_size * .02 * check_speed);
-						std::cout << "Projected check_car_s = " << check_car_s << std::endl;
-						if ((check_car_s > (car_s - min_gap_behind)) && (check_car_s < (car_s + min_gap_ahead)))
-						{
-							safe_change = false;
-							std::cout << "Can't change lane to target lane " << target_lane << " - car in the way!" << std::endl;
-						}
-          			}
-          		}
-          		if (safe_change)
-          		{
-          			lane = target_lane;
-          		}
-          	}
-
-          	// once a lane is selected to move into, the car should complete the lane-change before choosing a new path
-
 
           	// The remaining code creates a smooth path by adding new points to the previous un-used points
           	// This code will respect the setting for "lane" and aim to drive the car into that lane
