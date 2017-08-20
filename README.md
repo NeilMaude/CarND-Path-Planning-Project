@@ -2,7 +2,70 @@
 Self-Driving Car Engineer Nanodegree Program
 
 Neil Maude, August 2017
-   
+
+## Overview
+This project navigates a car around the Udacity path planning test track.  The objective is to plot a path which remains within the set constraints (speed limit, acceleration, jerk, avoiding other cars, remaining in lane unless changing lane), whilst making progress around the test loop.
+
+## Creating a Path
+The main loop of the application receives co-ordinates and sensor fusion data, then responds with a series of points which make up the path along which the vehicle will drive.  Un-used points are also passed to the main loop, allowing a continuous path to be created by adding to previously un-used points.
+
+Path planning is done using Frenet co-ordinates (s = distance along the roadway, d = distance from the roadway centre line) which allow planning using the required `lane` (0, 1, 2 from left to right) at a given point along the roadway - either the car remaining in the current lane or moving to a new lane.  Code within main.cpp uses the `spline.h` library to create points along this desired trajectory, which are appended to points that have been planned previously but not yet visited.   
+
+This spline-based process creates a smooth path for the vehicle.  By inspection, it was found that a path generated in this way from a lane to an adjacent lane at 50mph and covering approx 30m forward distance would not violate the jerk constraint and therefore this process can be used safely to generate lane-change paths.
+
+## Acceleration/Deceleration
+The path planner uses sensor fusion data to detect cars in the current lane and applies a deceleration to avoid collisions.  The deceleration is fixed at ~5m/s2 to remain within the acceleration constraints of the project.
+
+## Boundary Conditions
+The car initially starts at rest in lane 1(!).  Therefore setting the speed to 50mph would show as an instantaneous acceleration, violating the jerk constraint.  Therefore speed is started at 0mph and gradually increased.  So long as the lane ahead of the car is clear of vehicles, the car will accelerate at ~5m/s2 until the 50mph speed limit is reached (the max velocity is set at 49.5mph, to avoid risk of breaching the speed limit constraint).
+
+## Lane Selection and Scoring (Cost Function)
+If a car is detected in the current lane, the car will slow to avoid a collision, but will also seek an alternative lane.  This is done by a simple lane-scoring based on a weighted sum of distances to the cars in each lane.  
+
+Each car in a lane contributes to the cost function for that lane by:
+`(30 - distance_to_car) * weight`
+where the weight is a negative value
+
+Therefore a car which is nearby will have a large negative weight.  
+
+The preferred lane is the lane with the highest score.  The score for an empty lane will be 0 (no vehicles), with the right-most lane being preferred in the event of a tie.  If no lane is empty, the lane with the most distant car will be chosen.
+
+If the preferred lane is 2 lanes away from current (i.e. a move from 0 to 2 or 2 to 0 is chosen), the preferred lane will be set to lane 1 as an intermediate state (plotting a spline across 2 lanes will likely break the jerk constraint).  The preferred lane will be re-selected after this first lane change is completed.
+
+## Finite States
+The car has 5 possible states:
+1. Driving ahead
+2. Waiting to move left
+3. Waiting to move right
+4. Moving left
+5. Moving right
+
+The finite state machine starts off with the car driving ahead in the current lane and remains so until an obstructing car is found.
+
+At this point, the scoring process will select a lane and set the state to waiting to move left or right.
+
+The adjacent lane is then checked for obstructions - if there are none, the state is moved on to moving left/right.  Otherwise the state remains waiting and the car continues driving in the current lane until the lane change is safe.
+
+If the lane change is safe, points are plotted to make the chosen maneouver.
+
+Once a lane change is complete, the car state is set to driving in the current lane once more, until an obstruction is found.
+
+Note: it may be the case that there is lots of traffic in the chosen lane - therefore the car will remain in the waiting state for only approx. 5 seconds (250 points consumed) before scrapping that plan and re-scoring the lanes.
+
+## Output
+This path planning implementation drives the car smoothly around the test track, remaining within the speed/acceleration/jerk constraints and avoiding other cars.  The car is occasionally slowed due to being boxed-in by other cars, which could be improved by some of the enhancements suggested below.
+
+
+
+## Potential Enhancements
+The following are potential enhancements to the path planning process:
+* Variable acceleration and deceleration - these are set to a fixed rate, but could be tuned to the speed of vehicles in front of and to the side of the car.  For example this could be a proportional controller using the speed of the car ahead and distance to the car ahead as inputs, outputting a smoother deceleration for the path planner.
+* In general it is assumed that other cars will continue at a fixed speed in their current lane.  In the real world this will not be the case and a predictive solution would be an improvement over this simple assumption.
+* The lane scoring cost function is simple and effective, but could be improved.  For example, this function does not consider the speeds of cars in adjacent lanes and may select a lane with a slow car rather than a lane with a faster, but nearby, car - this second lane would make for better progress.
+* The lane scoring function only looks at cars which are within the 30m horizon used for speed detection.  Sometimes this means that the car prefers a lane which will shortly be occupied, over a lane which is clear for some distance.  This could be addressed by extending the horizon for the cost function.
+
+# Udacity Instructions Follow:
+
 ### Simulator.
 You can download the Term3 Simulator which contains the Path Planning Project from the [releases tab (https://github.com/udacity/self-driving-car-sim/releases).
 
